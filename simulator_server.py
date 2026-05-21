@@ -13,6 +13,7 @@ from sim_trade_manager import (
     update_trade_prices,
     find_open_trade_for_symbol,
     close_open_trade_for_symbol,
+    get_daily_pnl_summary,
 )
 
 load_dotenv()
@@ -353,6 +354,18 @@ def debug_env():
         "default_qty": DEFAULT_QTY,
         "default_stop_dollars": DEFAULT_STOP_DOLLARS,
         "default_target_dollars": DEFAULT_TARGET_DOLLARS,
+    })
+
+@app.route("/daily-pnl", methods=["GET"])
+def daily_pnl():
+    date_prefix = request.args.get("date")
+    summary = get_daily_pnl_summary(date_prefix=date_prefix)
+
+    return jsonify({
+        "ok": True,
+        "service": "strategy_5",
+        "simulation_only": SIMULATION_ONLY,
+        "summary": summary,
     })
 
 

@@ -246,3 +246,67 @@ def update_trade_prices(symbol, current_price):
     save_open_trades(trades)
 
     return trades, updated, updated_trades
+
+def get_daily_pnl_summary(date_prefix=None):
+    """
+    Return today's realized Strategy 5 P/L from closed trades.
+    date_prefix format: YYYY-MM-DD. Defaults to today's ET date.
+    """
+    if date_prefix is None:
+        date_prefix = now_et()[:10]
+
+    open_trades = [
+        trade for trade in load_open_trades()
+        if trade.get("status") == "OPEN"
+    ]
+
+    summary = {
+        "date": date_prefix,
+        "realized_pnl": 0.0,
+        "closed_trades": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "breakeven_trades": 0,
+        "open_trades": len(open_trades),
+        "open_symbols": sorted(list({
+            trade.get("symbol")
+            for trade in open_trades
+            if trade.get("symbol")
+        })),
+    }
+
+    if not os.path.isfile(CLOSED_TRADES_FILE):
+        return summary
+
+    with open(CLOSED_TRADES_FILE, mode="r", newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            closed_at = str(row.get("closed_at", ""))
+
+            if not closed_at.startswith(date_prefix):
+                continue
+
+            pnl_total = float(row.get("pnl_total") or 0)
+
+            summary["realized_pnl"] += pnl_total
+            summary["closed_trades"] += 1
+
+            if pnl_total > 0:
+                summary["winning_trades"] += 1
+            elif pnl_total < 0:
+                summary["losing_trades"] += 1
+            else:
+                summary["breakeven_trades"] += 1
+
+    summary["realized_pnl"] = round(summary["realized_pnl"], 2)
+
+    if summary["closed_trades"] > 0:
+        summary["win_rate"] = round(
+            summary["winning_trades"] / summary["closed_trades"] * 100,
+            2,
+        )
+    else:
+        summary["win_rate"] = 0.0
+
+    return summary
