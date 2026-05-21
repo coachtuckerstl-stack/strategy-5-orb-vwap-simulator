@@ -405,11 +405,22 @@ def daily_pnl():
             }).mappings().all()
 
             open_rows = conn.execute(text("""
-                SELECT DISTINCT symbol
-                FROM trade_events
-                WHERE source = 'strategy_5'
-                  AND timestamp_et LIKE :date_like
-                  AND exit_price IS NULL
+                WITH latest_symbol_event AS (
+                    SELECT DISTINCT ON (symbol)
+                        id,
+                        symbol,
+                        status,
+                        exit_price,
+                        timestamp_et
+                    FROM trade_events
+                    WHERE source = 'strategy_5'
+                      AND timestamp_et LIKE :date_like
+                      AND symbol IS NOT NULL
+                    ORDER BY symbol, timestamp_et DESC, id DESC
+                )
+                SELECT symbol
+                FROM latest_symbol_event
+                WHERE exit_price IS NULL
                   AND status IN ('SIMULATED', 'OPEN')
             """), {
                 "date_like": f"{date_prefix}%"
