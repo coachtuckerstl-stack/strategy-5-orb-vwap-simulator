@@ -13,7 +13,6 @@ from sim_trade_manager import (
     update_trade_prices,
     find_open_trade_for_symbol,
     close_open_trade_for_symbol,
-    get_daily_pnl_summary,
 )
 
 load_dotenv()
@@ -358,15 +357,135 @@ def debug_env():
 
 @app.route("/daily-pnl", methods=["GET"])
 def daily_pnl():
-    date_prefix = request.args.get("date")
-    summary = get_daily_pnl_summary(date_prefix=date_prefix)
+    """
+    Strategy 5 daily P/L from Railway Postgres trade_events table.
+    This matches the dashboard source of truth.
+    """
+    date_prefix = request.args.get("date") or now_et().date().isoformat()
 
-    return jsonify({
-        "ok": True,
-        "service": "strategy_5",
-        "simulation_only": SIMULATION_ONLY,
-        "summary": summary,
-    })
+    engine = get_engine()
+
+    if engine is None:
+        return jsonify({
+            "ok": False,
+            "service": "strategy_5",
+            "error": "DATABASE_URL not configured",
+            "summary": {
+                "date": date_prefix,
+                "realized_pnl": 0.0,
+                "closed_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "breakeven_trades": 0,
+                "open_trades": 0,
+                "open_symbols": [],
+                "win_rate": 0.0,
+            },
+        }), 500
+
+    try:
+        with engine.begin() as conn:
+            closed_rows = conn.execute(text("""
+                SELECT
+                    symbol,
+                    side,
+                    qty,
+                    entry_price,
+                    exit_price,
+                    status,
+                    timestamp_et,
+                    strategy
+                FROM trade_events
+                WHERE source = 'strategy_5'
+                  AND timestamp_et LIKE :date_like
+                  AND entry_price IS NOT NULL
+                  AND exit_price IS NOT NULL
+            """), {
+                "date_like": f"{date_prefix}%"
+            }).mappings().all()
+
+            open_rows = conn.execute(text("""
+                SELECT DISTINCT symbol
+                FROM trade_events
+                WHERE source = 'strategy_5'
+                  AND timestamp_et LIKE :date_like
+                  AND exit_price IS NULL
+                  AND status IN ('SIMULATED', 'OPEN')
+            """), {
+                "date_like": f"{date_prefix}%"
+            }).mappings().all()
+
+        realized_pnl = 0.0
+        winning_trades = 0
+        losing_trades = 0
+        breakeven_trades = 0
+
+        for row in closed_rows:
+            side = str(row.get("side") or "buy").lower()
+            qty = safe_float(row.get("qty"), 1) or 1
+            entry_price = safe_float(row.get("entry_price"), 0) or 0
+            exit_price = safe_float(row.get("exit_price"), 0) or 0
+
+            if side == "sell":
+                pnl = (entry_price - exit_price) * qty
+            else:
+                pnl = (exit_price - entry_price) * qty
+
+            pnl = round(pnl, 2)
+            realized_pnl += pnl
+
+            if pnl > 0:
+                winning_trades += 1
+            elif pnl < 0:
+                losing_trades += 1
+            else:
+                breakeven_trades += 1
+
+        closed_trades = len(closed_rows)
+        realized_pnl = round(realized_pnl, 2)
+        open_symbols = sorted([
+            row.get("symbol")
+            for row in open_rows
+            if row.get("symbol")
+        ])
+
+        win_rate = round((winning_trades / closed_trades) * 100, 2) if closed_trades else 0.0
+
+        return jsonify({
+            "ok": True,
+            "service": "strategy_5",
+            "simulation_only": SIMULATION_ONLY,
+            "source": "railway_postgres_trade_events",
+            "summary": {
+                "date": date_prefix,
+                "realized_pnl": realized_pnl,
+                "closed_trades": closed_trades,
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "breakeven_trades": breakeven_trades,
+                "open_trades": len(open_symbols),
+                "open_symbols": open_symbols,
+                "win_rate": win_rate,
+            },
+        })
+
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "service": "strategy_5",
+            "error": str(exc),
+            "summary": {
+                "date": date_prefix,
+                "realized_pnl": 0.0,
+                "closed_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "breakeven_trades": 0,
+                "open_trades": 0,
+                "open_symbols": [],
+                "win_rate": 0.0,
+            },
+        }), 500
 
 
 @app.route("/webhook", methods=["POST"])
