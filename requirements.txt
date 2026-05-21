@@ -1,3 +1,6 @@
 flask
 gunicorn
 python-dotenv
+SQLAlchemy
+psycopg2-binary
+pandas

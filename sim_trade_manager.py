@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,77 +17,126 @@ def load_open_trades():
     if not os.path.isfile(OPEN_TRADES_FILE):
         return []
 
-    with open(OPEN_TRADES_FILE, "r") as file:
-        return json.load(file)
+    try:
+        with open(OPEN_TRADES_FILE, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception:
+        return []
 
 
 def save_open_trades(trades):
-    with open(OPEN_TRADES_FILE, "w") as file:
+    with open(OPEN_TRADES_FILE, "w", encoding="utf-8") as file:
         json.dump(trades, file, indent=2)
 
 
 def log_closed_trade(trade):
     file_exists = os.path.isfile(CLOSED_TRADES_FILE)
 
-    pnl = round(
-        float(trade["closed_price"]) - float(trade["entry_price"]),
-        2
-    )
+    entry_price = float(trade.get("entry_price", 0))
+    closed_price = float(trade.get("closed_price", 0))
+    stop_price = float(trade.get("stop_price", 0))
+    qty = float(trade.get("qty", 1) or 1)
+    side = str(trade.get("side", "buy")).lower()
 
-    risk = round(
-        float(trade["entry_price"]) - float(trade["stop_price"]),
-        2
-    )
+    if side == "buy":
+        pnl_per_share = closed_price - entry_price
+        risk = entry_price - stop_price
+    else:
+        pnl_per_share = entry_price - closed_price
+        risk = stop_price - entry_price
 
-    r_multiple = round(pnl / risk, 2) if risk > 0 else 0
+    pnl_total = round(pnl_per_share * qty, 2)
+    pnl_per_share = round(pnl_per_share, 2)
+    risk = round(risk, 2)
+    r_multiple = round(pnl_per_share / risk, 2) if risk > 0 else 0
 
-    with open(CLOSED_TRADES_FILE, mode="a", newline="") as file:
+    with open(CLOSED_TRADES_FILE, mode="a", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
 
         if not file_exists:
             writer.writerow([
+                "trade_id",
                 "opened_at",
                 "closed_at",
                 "symbol",
                 "side",
+                "qty",
                 "entry_price",
                 "stop_price",
                 "target_price",
                 "closed_price",
                 "status",
                 "pnl_per_share",
-                "r_multiple"
+                "pnl_total",
+                "r_multiple",
+                "strategy",
+                "model",
             ])
 
         writer.writerow([
+            trade.get("trade_id"),
             trade.get("opened_at"),
             trade.get("closed_at"),
             trade.get("symbol"),
             trade.get("side"),
+            trade.get("qty"),
             trade.get("entry_price"),
             trade.get("stop_price"),
             trade.get("target_price"),
             trade.get("closed_price"),
             trade.get("status"),
-            pnl,
-            r_multiple
+            pnl_per_share,
+            pnl_total,
+            r_multiple,
+            trade.get("strategy"),
+            trade.get("model"),
         ])
 
 
-def create_sim_trade(symbol, side, entry_price):
+def create_sim_trade(
+    symbol,
+    side,
+    entry_price,
+    qty=1,
+    strategy="strategy_5_orb_vwap",
+    model="strategy5_tradingview_simulator",
+    stop_dollars=None,
+    target_dollars=None,
+):
     entry_price = float(entry_price)
+    qty = float(qty or 1)
+    side = str(side).lower().strip()
 
-    stop_price = round(entry_price * 0.992, 2)
-    target_price = round(entry_price * 1.013, 2)
+    if stop_dollars is not None and target_dollars is not None:
+        stop_dollars = float(stop_dollars)
+        target_dollars = float(target_dollars)
+
+        if side == "buy":
+            stop_price = round(entry_price - stop_dollars, 2)
+            target_price = round(entry_price + target_dollars, 2)
+        else:
+            stop_price = round(entry_price + stop_dollars, 2)
+            target_price = round(entry_price - target_dollars, 2)
+    else:
+        if side == "buy":
+            stop_price = round(entry_price * 0.992, 2)
+            target_price = round(entry_price * 1.013, 2)
+        else:
+            stop_price = round(entry_price * 1.008, 2)
+            target_price = round(entry_price * 0.987, 2)
 
     trade = {
-        "symbol": symbol,
+        "trade_id": str(uuid.uuid4()),
+        "symbol": str(symbol).upper().strip(),
         "side": side,
-        "entry_price": entry_price,
+        "qty": qty,
+        "entry_price": round(entry_price, 2),
         "stop_price": stop_price,
         "target_price": target_price,
         "status": "OPEN",
-        "opened_at": now_et()
+        "opened_at": now_et(),
+        "strategy": strategy,
+        "model": model,
     }
 
     trades = load_open_trades()
@@ -99,31 +149,45 @@ def create_sim_trade(symbol, side, entry_price):
 def update_trade_prices(symbol, current_price):
     trades = load_open_trades()
     current_price = float(current_price)
+    symbol = str(symbol).upper().strip()
 
     updated = False
+    updated_trades = []
 
     for trade in trades:
-        if trade["symbol"] != symbol:
+        if str(trade.get("symbol", "")).upper() != symbol:
             continue
 
-        if trade["status"] != "OPEN":
+        if trade.get("status") != "OPEN":
             continue
 
-        if trade["side"] == "buy":
-            if current_price >= float(trade["target_price"]):
-                trade["status"] = "TARGET_HIT"
-                trade["closed_price"] = current_price
-                trade["closed_at"] = now_et()
-                log_closed_trade(trade)
-                updated = True
+        side = str(trade.get("side", "buy")).lower()
+        target_price = float(trade.get("target_price"))
+        stop_price = float(trade.get("stop_price"))
 
-            elif current_price <= float(trade["stop_price"]):
-                trade["status"] = "STOP_HIT"
-                trade["closed_price"] = current_price
-                trade["closed_at"] = now_et()
-                log_closed_trade(trade)
-                updated = True
+        if side == "buy":
+            target_hit = current_price >= target_price
+            stop_hit = current_price <= stop_price
+        else:
+            target_hit = current_price <= target_price
+            stop_hit = current_price >= stop_price
+
+        if target_hit:
+            trade["status"] = "TARGET_HIT"
+            trade["closed_price"] = round(current_price, 2)
+            trade["closed_at"] = now_et()
+            log_closed_trade(trade)
+            updated = True
+            updated_trades.append(trade)
+
+        elif stop_hit:
+            trade["status"] = "STOP_HIT"
+            trade["closed_price"] = round(current_price, 2)
+            trade["closed_at"] = now_et()
+            log_closed_trade(trade)
+            updated = True
+            updated_trades.append(trade)
 
     save_open_trades(trades)
 
-    return trades, updated
+    return trades, updated, updated_trades
