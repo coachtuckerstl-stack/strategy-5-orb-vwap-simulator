@@ -93,6 +93,61 @@ def log_closed_trade(trade):
         ])
 
 
+def find_open_trade_for_symbol(symbol, strategy=None):
+    """
+    Find an existing open Strategy 5 trade for this symbol.
+    Used to block duplicate buy entries.
+    """
+    symbol = str(symbol).upper().strip()
+    trades = load_open_trades()
+
+    for trade in trades:
+        if str(trade.get("symbol", "")).upper().strip() != symbol:
+            continue
+
+        if trade.get("status") != "OPEN":
+            continue
+
+        if strategy and trade.get("strategy") != strategy:
+            continue
+
+        return trade
+
+    return None
+
+
+def close_open_trade_for_symbol(symbol, exit_price, strategy=None, close_reason="EXIT_SIGNAL"):
+    """
+    Close the most recent open Strategy 5 trade for this symbol.
+    Used when TradingView sends a sell/exit alert.
+    """
+    symbol = str(symbol).upper().strip()
+    exit_price = float(exit_price)
+    trades = load_open_trades()
+
+    closed_trade = None
+
+    for trade in reversed(trades):
+        if str(trade.get("symbol", "")).upper().strip() != symbol:
+            continue
+
+        if trade.get("status") != "OPEN":
+            continue
+
+        if strategy and trade.get("strategy") != strategy:
+            continue
+
+        trade["status"] = close_reason
+        trade["closed_price"] = round(exit_price, 2)
+        trade["closed_at"] = now_et()
+        log_closed_trade(trade)
+        closed_trade = trade
+        break
+
+    save_open_trades(trades)
+    return closed_trade
+
+
 def create_sim_trade(
     symbol,
     side,

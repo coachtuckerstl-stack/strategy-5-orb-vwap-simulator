@@ -8,7 +8,12 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, text
 
-from sim_trade_manager import create_sim_trade, update_trade_prices
+from sim_trade_manager import (
+    create_sim_trade,
+    update_trade_prices,
+    find_open_trade_for_symbol,
+    close_open_trade_for_symbol,
+)
 
 load_dotenv()
 
@@ -387,6 +392,53 @@ def webhook():
     if price_float is None:
         return jsonify({"ok": False, "error": "Invalid price"}), 400
 
+    # Sell alerts are exit alerts. They close an existing open trade.
+    # They should not create a new simulated sell/short trade.
+    if side == "sell":
+        closed_trade = close_open_trade_for_symbol(
+            symbol=symbol,
+            exit_price=price_float,
+            strategy=strategy,
+            close_reason="EXIT_SIGNAL",
+        )
+
+        if not closed_trade:
+            log_event(payload, "SIM_EXIT_IGNORED", f"No open Strategy 5 trade found for {symbol}")
+
+            return jsonify({
+                "ok": False,
+                "blocked": True,
+                "simulation_only": True,
+                "message": "No open Strategy 5 trade found to close.",
+                "symbol": symbol,
+                "side": side,
+                "price": price_float,
+            }), 200
+
+        event = trade_to_event(
+            closed_trade,
+            payload,
+            status=closed_trade.get("status"),
+            reason="Strategy 5 simulated trade closed from TradingView sell/exit alert.",
+        )
+
+        pg_ok, pg_msg = upsert_trade_event(event)
+
+        log_event(payload, "SIM_TRADE_CLOSED", f"Simulated trade closed for {symbol}")
+
+        return jsonify({
+            "ok": True,
+            "closed": True,
+            "simulation_only": True,
+            "message": "Strategy 5 simulated trade closed.",
+            "trade": closed_trade,
+            "postgres": {
+                "ok": pg_ok,
+                "message": pg_msg,
+            },
+        }), 200
+
+    # Update open trades first so stop/target hits still close before any new entry logic.
     trades, updated, updated_trades = update_trade_prices(symbol, price_float)
 
     postgres_results = []
@@ -416,6 +468,25 @@ def webhook():
             "trades": trades,
             "postgres": postgres_results,
         })
+
+    # Buy alerts should not create duplicate open trades for the same symbol.
+    existing_open_trade = find_open_trade_for_symbol(
+        symbol=symbol,
+        strategy=strategy,
+    )
+
+    if existing_open_trade:
+        log_event(payload, "SIM_ENTRY_BLOCKED", f"Duplicate open Strategy 5 trade blocked for {symbol}")
+
+        return jsonify({
+            "ok": False,
+            "blocked": True,
+            "simulation_only": True,
+            "message": "Already in open Strategy 5 trade for this symbol.",
+            "symbol": symbol,
+            "strategy": strategy,
+            "existing_trade": existing_open_trade,
+        }), 200
 
     trade = create_sim_trade(
         symbol=symbol,
