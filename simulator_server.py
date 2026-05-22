@@ -883,9 +883,12 @@ def webhook():
     })
 
 
-if __name__ == "__main__":
-    if MONITOR_ENABLED:
-        start_monitor_loop()
+if MONITOR_ENABLED:
+    start_monitor_loop()
+else:
+    print("Strategy 5 monitor disabled - Alpaca credentials not loaded", flush=True)
 
+
+if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
