@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, text
 
+from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestTradeRequest
+
 from sim_trade_manager import (
     create_sim_trade,
     update_trade_prices,
@@ -36,6 +39,32 @@ MODEL_NAME = "strategy5_tradingview_simulator"
 DEFAULT_QTY = float(os.getenv("STRATEGY5_DEFAULT_QTY", "1"))
 DEFAULT_STOP_DOLLARS = float(os.getenv("STRATEGY5_STOP_DOLLARS", "1.50"))
 DEFAULT_TARGET_DOLLARS = float(os.getenv("STRATEGY5_TARGET_DOLLARS", "3.00"))
+
+ALPACA_API_KEY = (
+    os.getenv("ALPACA_API_KEY")
+    or os.getenv("APCA_API_KEY_ID")
+)
+
+ALPACA_SECRET_KEY = (
+    os.getenv("ALPACA_SECRET_KEY")
+    or os.getenv("APCA_API_SECRET_KEY")
+)
+
+MONITOR_ENABLED = bool(ALPACA_API_KEY and ALPACA_SECRET_KEY)
+
+MARKET_DATA_CLIENT = None
+
+if MONITOR_ENABLED:
+    try:
+        MARKET_DATA_CLIENT = StockHistoricalDataClient(
+            ALPACA_API_KEY,
+            ALPACA_SECRET_KEY,
+        )
+        print("Strategy 5 monitor market data client initialized", flush=True)
+    except Exception as exc:
+        print(f"Strategy 5 market data init failed: {exc}", flush=True)
+        MARKET_DATA_CLIENT = None
+        MONITOR_ENABLED = False
 
 
 def now_et():
@@ -312,6 +341,195 @@ def trade_to_event(trade, payload, status=None, reason=None):
         }),
         "created_at": trade.get("opened_at") or now_et_iso(),
     }
+
+def market_monitor_window_open():
+    now_time = now_et().time()
+
+    market_start = datetime.strptime("09:30", "%H:%M").time()
+    market_end = datetime.strptime("15:55", "%H:%M").time()
+
+    return market_start <= now_time <= market_end
+
+
+def get_open_strategy5_trades():
+    engine = get_engine()
+
+    if engine is None:
+        return []
+
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                WITH latest_symbol_event AS (
+                    SELECT DISTINCT ON (symbol)
+                        id,
+                        symbol,
+                        qty,
+                        entry_price,
+                        stop_loss,
+                        take_profit,
+                        status,
+                        order_id,
+                        timestamp_et
+                    FROM trade_events
+                    WHERE source = 'strategy_5'
+                      AND symbol IS NOT NULL
+                    ORDER BY symbol, timestamp_et DESC, id DESC
+                )
+                SELECT *
+                FROM latest_symbol_event
+                WHERE status IN ('SIMULATED', 'OPEN')
+                  AND entry_price IS NOT NULL
+            """)).mappings().all()
+
+            return [dict(row) for row in rows]
+
+    except Exception as exc:
+        print(f"S5 monitor open-trade query failed: {exc}", flush=True)
+        return []
+
+
+def get_latest_prices(symbols):
+    if not symbols:
+        return {}
+
+    if MARKET_DATA_CLIENT is None:
+        return {}
+
+    try:
+        request = StockLatestTradeRequest(
+            symbol_or_symbols=symbols
+        )
+
+        latest = MARKET_DATA_CLIENT.get_stock_latest_trade(request)
+
+        prices = {}
+
+        for symbol, trade in latest.items():
+            prices[symbol] = float(trade.price)
+
+        return prices
+
+    except Exception as exc:
+        print(f"S5 monitor latest-price request failed: {exc}", flush=True)
+        return {}
+
+
+def close_trade_in_postgres(trade, exit_price, status):
+    engine = get_engine()
+
+    if engine is None:
+        return False
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE trade_events
+                SET
+                    exit_price = :exit_price,
+                    status = :status,
+                    updated_at = :updated_at,
+                    timestamp_et = :timestamp_et
+                WHERE source = 'strategy_5'
+                  AND order_id = :order_id
+            """), {
+                "exit_price": round(float(exit_price), 2),
+                "status": status,
+                "updated_at": now_et_iso(),
+                "timestamp_et": now_et_iso(),
+                "order_id": trade["order_id"],
+            })
+
+        return True
+
+    except Exception as exc:
+        print(f"S5 monitor close update failed: {exc}", flush=True)
+        return False
+
+
+def run_strategy5_monitor_cycle():
+    if not MONITOR_ENABLED:
+        return
+
+    if not market_monitor_window_open():
+        return
+
+    open_trades = get_open_strategy5_trades()
+
+    if not open_trades:
+        return
+
+    symbols = sorted(list({
+        trade["symbol"]
+        for trade in open_trades
+        if trade.get("symbol")
+    }))
+
+    print(f"S5 MONITOR: checking {len(symbols)} symbols: {symbols}", flush=True)
+
+    latest_prices = get_latest_prices(symbols)
+
+    if not latest_prices:
+        return
+
+    for trade in open_trades:
+        symbol = trade["symbol"]
+
+        if symbol not in latest_prices:
+            continue
+
+        current_price = float(latest_prices[symbol])
+
+        stop_price = float(trade["stop_loss"])
+        target_price = float(trade["take_profit"])
+
+        target_hit = current_price >= target_price
+        stop_hit = current_price <= stop_price
+
+        if target_hit:
+            updated = close_trade_in_postgres(
+                trade,
+                current_price,
+                "TARGET_HIT",
+            )
+
+            if updated:
+                print(
+                    f"S5 MONITOR: {symbol} TARGET_HIT at ${current_price}",
+                    flush=True,
+                )
+
+        elif stop_hit:
+            updated = close_trade_in_postgres(
+                trade,
+                current_price,
+                "STOP_HIT",
+            )
+
+            if updated:
+                print(
+                    f"S5 MONITOR: {symbol} STOP_HIT at ${current_price}",
+                    flush=True,
+                )
+
+
+def start_monitor_loop():
+    import threading
+    import time
+
+    def loop():
+        print("Strategy 5 monitor loop started", flush=True)
+
+        while True:
+            try:
+                run_strategy5_monitor_cycle()
+            except Exception as exc:
+                print(f"S5 MONITOR LOOP ERROR: {exc}", flush=True)
+
+            time.sleep(60)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
 
 
 @app.route("/", methods=["GET"])
@@ -666,5 +884,8 @@ def webhook():
 
 
 if __name__ == "__main__":
+    if MONITOR_ENABLED:
+        start_monitor_loop()
+
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)

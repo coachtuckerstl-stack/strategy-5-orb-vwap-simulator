@@ -4,3 +4,4 @@ python-dotenv
 SQLAlchemy
 psycopg2-binary
 pandas
+alpaca-py
