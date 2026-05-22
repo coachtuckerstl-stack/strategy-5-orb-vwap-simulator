@@ -351,42 +351,125 @@ def market_monitor_window_open():
     return market_start <= now_time <= market_end
 
 
-def get_open_strategy5_trades():
+def get_open_strategy5_trades(date_prefix=None):
+    """
+    Return open Strategy 5 trades from Railway Postgres.
+    Only today's simulated trades are monitored so older test rows
+    are not accidentally closed using today's market price.
+    """
     engine = get_engine()
 
     if engine is None:
         return []
 
+    date_prefix = date_prefix or now_et().date().isoformat()
+
     try:
         with engine.begin() as conn:
             rows = conn.execute(text("""
-                WITH latest_symbol_event AS (
-                    SELECT DISTINCT ON (symbol)
-                        id,
-                        symbol,
-                        qty,
-                        entry_price,
-                        stop_loss,
-                        take_profit,
-                        status,
-                        order_id,
-                        timestamp_et
-                    FROM trade_events
-                    WHERE source = 'strategy_5'
-                      AND symbol IS NOT NULL
-                    ORDER BY symbol, timestamp_et DESC, id DESC
-                )
-                SELECT *
-                FROM latest_symbol_event
-                WHERE status IN ('SIMULATED', 'OPEN')
-                  AND entry_price IS NOT NULL
-            """)).mappings().all()
+                SELECT
+                    id,
+                    symbol,
+                    qty,
+                    entry_price,
+                    stop_loss,
+                    take_profit,
+                    status,
+                    order_id,
+                    strategy,
+                    timestamp_et,
+                    created_at
+                FROM trade_events
+                WHERE source = 'strategy_5'
+                  AND symbol IS NOT NULL
+                  AND created_at LIKE :date_like
+                  AND exit_price IS NULL
+                  AND status IN ('SIMULATED', 'OPEN')
+                ORDER BY created_at DESC, id DESC
+            """), {
+                "date_like": f"{date_prefix}%"
+            }).mappings().all()
 
             return [dict(row) for row in rows]
 
     except Exception as exc:
         print(f"S5 monitor open-trade query failed: {exc}", flush=True)
         return []
+
+def find_open_postgres_trade_for_symbol(symbol, strategy=None):
+    """
+    Find today's open Strategy 5 trade for a symbol using Railway Postgres.
+    """
+    symbol = str(symbol).upper().strip()
+    date_prefix = now_et().date().isoformat()
+    engine = get_engine()
+
+    if engine is None:
+        return None
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT
+                    id,
+                    symbol,
+                    qty,
+                    entry_price,
+                    stop_loss,
+                    take_profit,
+                    status,
+                    order_id,
+                    strategy,
+                    timestamp_et,
+                    created_at
+                FROM trade_events
+                WHERE source = 'strategy_5'
+                  AND symbol = :symbol
+                  AND created_at LIKE :date_like
+                  AND exit_price IS NULL
+                  AND status IN ('SIMULATED', 'OPEN')
+                  AND (:strategy IS NULL OR strategy = :strategy)
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            """), {
+                "symbol": symbol,
+                "strategy": strategy,
+                "date_like": f"{date_prefix}%"
+            }).mappings().first()
+
+            return dict(row) if row else None
+
+    except Exception as exc:
+        print(f"S5 Postgres open-trade lookup failed: {exc}", flush=True)
+        return None
+
+def close_postgres_trade_for_symbol(symbol, exit_price, strategy=None, status="EXIT_SIGNAL"):
+    """
+    Close today's open Strategy 5 trade for a symbol in Railway Postgres.
+    """
+    open_trade = find_open_postgres_trade_for_symbol(symbol, strategy)
+
+    if not open_trade:
+        return None
+
+    updated = close_trade_in_postgres(
+        open_trade,
+        exit_price,
+        status,
+    )
+
+    if not updated:
+        return None
+
+    open_trade["exit_price"] = round(float(exit_price), 2)
+    open_trade["closed_price"] = round(float(exit_price), 2)
+    open_trade["closed_at"] = now_et_iso()
+    open_trade["status"] = status
+    open_trade["trade_id"] = open_trade.get("order_id")
+    open_trade["stop_price"] = open_trade.get("stop_loss")
+    open_trade["target_price"] = open_trade.get("take_profit")
+
+    return open_trade
 
 
 def get_latest_prices(symbols):
@@ -451,7 +534,13 @@ def run_strategy5_monitor_cycle():
     if not MONITOR_ENABLED:
         return
 
-    if not market_monitor_window_open():
+    current_time = now_et().time()
+
+    market_start = datetime.strptime("09:30", "%H:%M").time()
+    eod_close_start = datetime.strptime("15:55", "%H:%M").time()
+    market_end = datetime.strptime("15:59", "%H:%M").time()
+
+    if current_time < market_start or current_time > market_end:
         return
 
     open_trades = get_open_strategy5_trades()
@@ -472,6 +561,8 @@ def run_strategy5_monitor_cycle():
     if not latest_prices:
         return
 
+    eod_close_window = eod_close_start <= current_time <= market_end
+
     for trade in open_trades:
         symbol = trade["symbol"]
 
@@ -479,14 +570,25 @@ def run_strategy5_monitor_cycle():
             continue
 
         current_price = float(latest_prices[symbol])
+        stop_price = safe_float(trade.get("stop_loss"))
+        target_price = safe_float(trade.get("take_profit"))
 
-        stop_price = float(trade["stop_loss"])
-        target_price = float(trade["take_profit"])
+        if eod_close_window:
+            updated = close_trade_in_postgres(
+                trade,
+                current_price,
+                "EOD_CLOSE",
+            )
 
-        target_hit = current_price >= target_price
-        stop_hit = current_price <= stop_price
+            if updated:
+                print(
+                    f"S5 MONITOR: {symbol} EOD_CLOSE at ${current_price:.2f}",
+                    flush=True,
+                )
 
-        if target_hit:
+            continue
+
+        if target_price is not None and current_price >= target_price:
             updated = close_trade_in_postgres(
                 trade,
                 current_price,
@@ -495,11 +597,11 @@ def run_strategy5_monitor_cycle():
 
             if updated:
                 print(
-                    f"S5 MONITOR: {symbol} TARGET_HIT at ${current_price}",
+                    f"S5 MONITOR: {symbol} TARGET_HIT at ${current_price:.2f}",
                     flush=True,
                 )
 
-        elif stop_hit:
+        elif stop_price is not None and current_price <= stop_price:
             updated = close_trade_in_postgres(
                 trade,
                 current_price,
@@ -508,7 +610,7 @@ def run_strategy5_monitor_cycle():
 
             if updated:
                 print(
-                    f"S5 MONITOR: {symbol} STOP_HIT at ${current_price}",
+                    f"S5 MONITOR: {symbol} STOP_HIT at ${current_price:.2f}",
                     flush=True,
                 )
 
@@ -755,13 +857,13 @@ def webhook():
 
     # Sell alerts are exit alerts. They close an existing open trade.
     # They should not create a new simulated sell/short trade.
-    if side == "sell":
-        closed_trade = close_open_trade_for_symbol(
-            symbol=symbol,
-            exit_price=price_float,
-            strategy=strategy,
-            close_reason="EXIT_SIGNAL",
-        )
+        if side == "sell":
+            closed_trade = close_postgres_trade_for_symbol(
+                symbol=symbol,
+                exit_price=price_float,
+                strategy=strategy,
+                status="EXIT_SIGNAL",
+            )
 
         if not closed_trade:
             log_event(payload, "SIM_EXIT_IGNORED", f"No open Strategy 5 trade found for {symbol}")
@@ -831,7 +933,7 @@ def webhook():
         })
 
     # Buy alerts should not create duplicate open trades for the same symbol.
-    existing_open_trade = find_open_trade_for_symbol(
+    existing_open_trade = find_open_postgres_trade_for_symbol(
         symbol=symbol,
         strategy=strategy,
     )
