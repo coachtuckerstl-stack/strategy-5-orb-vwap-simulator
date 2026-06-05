@@ -165,7 +165,7 @@ def create_sim_trade(
     symbol,
     side,
     entry_price,
-    qty=calculate_fractional_qty(entry_price),
+    qty=1,
     strategy="strategy_5_orb_vwap",
     model="strategy5_tradingview_simulator",
     stop_dollars=None,
