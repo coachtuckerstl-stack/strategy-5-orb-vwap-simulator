@@ -1,6 +1,8 @@
 import csv
 import json
 import os
+
+MAX_DOLLARS_PER_TRADE = float(os.getenv("MAX_DOLLARS_PER_TRADE", "20"))
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -8,6 +10,17 @@ from zoneinfo import ZoneInfo
 OPEN_TRADES_FILE = "open_trades.json"
 CLOSED_TRADES_FILE = "strategy5_closed_trades.csv"
 
+
+
+def calculate_fractional_qty(entry_price):
+    """Return fractional simulated qty for fixed $20 notional testing."""
+    try:
+        entry_price = float(entry_price)
+        if entry_price <= 0:
+            return 0
+        return round(MAX_DOLLARS_PER_TRADE / entry_price, 6)
+    except Exception:
+        return 0
 
 def now_et():
     return datetime.now(ZoneInfo("America/New_York")).isoformat()
@@ -152,7 +165,7 @@ def create_sim_trade(
     symbol,
     side,
     entry_price,
-    qty=1,
+    qty=calculate_fractional_qty(entry_price),
     strategy="strategy_5_orb_vwap",
     model="strategy5_tradingview_simulator",
     stop_dollars=None,
