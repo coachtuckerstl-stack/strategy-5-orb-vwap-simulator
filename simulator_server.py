@@ -818,6 +818,51 @@ def daily_pnl():
             },
         }), 500
 
+@app.route("/trades", methods=["GET"])
+def trades():
+
+    engine = get_engine()
+
+    if engine is None:
+        return jsonify({
+            "ok": False,
+            "error": "DATABASE_URL not configured"
+        }), 500
+
+    try:
+
+        with engine.begin() as conn:
+
+            rows = conn.execute(text("""
+                SELECT
+                    timestamp_et,
+                    symbol,
+                    side,
+                    qty,
+                    entry_price,
+                    exit_price,
+                    stop_loss,
+                    take_profit,
+                    status,
+                    order_id
+                FROM trade_events
+                WHERE source = 'strategy_5'
+                ORDER BY id DESC
+                LIMIT 100
+            """)).mappings().all()
+
+        return jsonify({
+            "ok": True,
+            "count": len(rows),
+            "trades": [dict(r) for r in rows]
+        })
+
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "error": str(exc)
+        }), 500
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
