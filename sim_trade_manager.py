@@ -242,7 +242,7 @@ def update_trade_prices(symbol, current_price):
 
         if target_hit:
             trade["status"] = "TARGET_HIT"
-            trade["closed_price"] = round(current_price, 2)
+            trade["closed_price"] = round(target_price, 2)
             trade["closed_at"] = now_et()
             log_closed_trade(trade)
             updated = True
@@ -250,7 +250,7 @@ def update_trade_prices(symbol, current_price):
 
         elif stop_hit:
             trade["status"] = "STOP_HIT"
-            trade["closed_price"] = round(current_price, 2)
+            trade["closed_price"] = round(stop_price, 2)
             trade["closed_at"] = now_et()
             log_closed_trade(trade)
             updated = True
@@ -323,3 +323,4 @@ def get_daily_pnl_summary(date_prefix=None):
         summary["win_rate"] = 0.0
 
     return summary
+
