@@ -591,7 +591,7 @@ def run_strategy5_monitor_cycle():
         if target_price is not None and current_price >= target_price:
             updated = close_trade_in_postgres(
                 trade,
-                current_price,
+                target_price,
                 "TARGET_HIT",
             )
 
@@ -604,7 +604,7 @@ def run_strategy5_monitor_cycle():
         elif stop_price is not None and current_price <= stop_price:
             updated = close_trade_in_postgres(
                 trade,
-                current_price,
+                stop_price,
                 "STOP_HIT",
             )
 
