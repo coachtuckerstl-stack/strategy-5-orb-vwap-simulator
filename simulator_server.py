@@ -40,6 +40,48 @@ DEFAULT_QTY = float(os.getenv("STRATEGY5_DEFAULT_QTY", "1"))
 DEFAULT_STOP_DOLLARS = float(os.getenv("STRATEGY5_STOP_DOLLARS", "1.50"))
 DEFAULT_TARGET_DOLLARS = float(os.getenv("STRATEGY5_TARGET_DOLLARS", "3.00"))
 
+# ===== COACH_T_STRAT5_500_SIM_RULES_START =====
+def coach_t_env_bool(name, default="false"):
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def coach_t_env_float(name, default):
+    value = os.getenv(name)
+    if value in (None, ""):
+        return float(default)
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+STRAT5_STARTING_EQUITY = coach_t_env_float("STRAT5_STARTING_EQUITY", 500)
+STRAT5_MAX_POSITION_DOLLARS = coach_t_env_float(
+    "STRAT5_MAX_POSITION_DOLLARS",
+    os.getenv("MAX_DOLLARS_PER_TRADE", "500"),
+)
+STRAT5_ONE_OPEN_TRADE = coach_t_env_bool("STRAT5_ONE_OPEN_TRADE", "true")
+STRAT5_ACCOUNT_NAME = os.getenv("STRAT5_ACCOUNT_NAME", "Strat 5 - 500 Paper").strip()
+STRAT5_MODE = os.getenv("STRAT5_MODE", "paper").strip().lower()
+
+
+def calculate_strategy5_qty(entry_price):
+    """
+    Strategy 5 simulated account sizing.
+    Uses max position dollars divided by alert entry price.
+    This does not place Alpaca orders.
+    """
+    try:
+        entry_price = float(entry_price)
+        max_dollars = float(STRAT5_MAX_POSITION_DOLLARS)
+        if entry_price <= 0 or max_dollars <= 0:
+            return 0
+        return round(max_dollars / entry_price, 6)
+    except Exception:
+        return 0
+# ===== COACH_T_STRAT5_500_SIM_RULES_END =====
+
+
 ALPACA_API_KEY = (
     os.getenv("ALPACA_API_KEY")
     or os.getenv("APCA_API_KEY_ID")
@@ -673,6 +715,12 @@ def debug_env():
         "default_qty": DEFAULT_QTY,
         "default_stop_dollars": DEFAULT_STOP_DOLLARS,
         "default_target_dollars": DEFAULT_TARGET_DOLLARS,
+        "strat5_account_name": STRAT5_ACCOUNT_NAME,
+        "strat5_mode": STRAT5_MODE,
+        "strat5_starting_equity": STRAT5_STARTING_EQUITY,
+        "strat5_max_position_dollars": STRAT5_MAX_POSITION_DOLLARS,
+        "strat5_one_open_trade": STRAT5_ONE_OPEN_TRADE,
+        "alpaca_orders_enabled": PLACE_ALPACA_ORDERS,
     })
 
 @app.route("/daily-pnl", methods=["GET"])
@@ -996,6 +1044,51 @@ def webhook():
             "existing_trade": existing_open_trade,
         }), 200
 
+    # ===== COACH_T_STRAT5_ONE_OPEN_TRADE_RULE =====
+    if STRAT5_ONE_OPEN_TRADE:
+        open_trades = get_open_strategy5_trades()
+
+        if open_trades:
+            existing_symbols = sorted([
+                str(t.get("symbol", "")).upper()
+                for t in open_trades
+                if t.get("symbol")
+            ])
+
+            log_event(
+                payload,
+                "SIM_ENTRY_BLOCKED",
+                f"One-open-trade rule blocked new {symbol} entry; open trades: {existing_symbols}",
+            )
+
+            return jsonify({
+                "ok": False,
+                "blocked": True,
+                "simulation_only": True,
+                "message": "Strategy 5 one-open-trade rule blocked this entry.",
+                "symbol": symbol,
+                "strategy": strategy,
+                "open_symbols": existing_symbols,
+                "open_trade_count": len(open_trades),
+                "account_name": STRAT5_ACCOUNT_NAME,
+                "max_position_dollars": STRAT5_MAX_POSITION_DOLLARS,
+            }), 200
+
+    qty = calculate_strategy5_qty(price_float)
+
+    if qty <= 0:
+        log_event(payload, "SIM_ENTRY_BLOCKED", f"Invalid calculated Strategy 5 qty for {symbol}")
+
+        return jsonify({
+            "ok": False,
+            "blocked": True,
+            "simulation_only": True,
+            "message": "Invalid Strategy 5 calculated quantity.",
+            "symbol": symbol,
+            "price": price_float,
+            "max_position_dollars": STRAT5_MAX_POSITION_DOLLARS,
+        }), 200
+
     trade = create_sim_trade(
         symbol=symbol,
         side=side,
@@ -1021,7 +1114,12 @@ def webhook():
     return jsonify({
         "ok": True,
         "simulation_only": True,
-        "message": "Strategy 5 simulated trade created.",
+        "message": "Strategy 5 simulated trade created under $500 paper-account rules.",
+        "account_name": STRAT5_ACCOUNT_NAME,
+        "mode": STRAT5_MODE,
+        "max_position_dollars": STRAT5_MAX_POSITION_DOLLARS,
+        "one_open_trade": STRAT5_ONE_OPEN_TRADE,
+        "alpaca_orders_enabled": PLACE_ALPACA_ORDERS,
         "trade": trade,
         "postgres": {
             "ok": pg_ok,

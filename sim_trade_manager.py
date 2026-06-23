@@ -2,7 +2,22 @@ import csv
 import json
 import os
 
-MAX_DOLLARS_PER_TRADE = float(os.getenv("MAX_DOLLARS_PER_TRADE", "20"))
+def _coach_t_money_env(*names, default="20"):
+    for name in names:
+        value = os.getenv(name)
+        if value not in (None, ""):
+            try:
+                return float(value)
+            except Exception:
+                pass
+    return float(default)
+
+
+MAX_DOLLARS_PER_TRADE = _coach_t_money_env(
+    "STRAT5_MAX_POSITION_DOLLARS",
+    "MAX_DOLLARS_PER_TRADE",
+    default="20",
+)
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
