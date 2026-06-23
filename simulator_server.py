@@ -426,7 +426,7 @@ def get_open_strategy5_trades(date_prefix=None):
                 FROM trade_events
                 WHERE source = 'strategy_5'
                   AND symbol IS NOT NULL
-                  AND created_at LIKE :date_like
+                  AND created_at::text LIKE :date_like
                   AND exit_price IS NULL
                   AND status IN ('SIMULATED', 'OPEN')
                 ORDER BY created_at DESC, id DESC
@@ -469,7 +469,7 @@ def find_open_postgres_trade_for_symbol(symbol, strategy=None):
                 FROM trade_events
                 WHERE source = 'strategy_5'
                   AND symbol = :symbol
-                  AND created_at LIKE :date_like
+                  AND created_at::text LIKE :date_like
                   AND exit_price IS NULL
                   AND status IN ('SIMULATED', 'OPEN')
                   AND (:strategy IS NULL OR strategy = :strategy)
@@ -1583,3 +1583,4 @@ else:
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
