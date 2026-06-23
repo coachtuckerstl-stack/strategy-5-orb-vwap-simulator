@@ -1280,6 +1280,52 @@ def strat5_alpaca_status():
 # ===== COACH_T_STRAT5_ALPACA_STATUS_END =====
 
 
+
+# ===== COACH_T_STRAT5_SIZING_CHECK_START =====
+@app.route("/sizing-check", methods=["GET"])
+@app.route("/api/strat5/sizing-check", methods=["GET"])
+def strat5_sizing_check():
+    """
+    Dry-run Strategy 5 sizing check.
+    This endpoint does not create trades and does not place Alpaca orders.
+    """
+    raw_price = (
+        request.args.get("price")
+        or request.args.get("entry_price")
+        or ""
+    )
+
+    try:
+        entry_price = float(raw_price)
+    except Exception:
+        return jsonify({
+            "ok": False,
+            "error": "Missing or invalid price. Use ?price=5.00",
+            "example": "/api/strat5/sizing-check?price=5.00",
+        }), 400
+
+    qty = calculate_strategy5_qty(entry_price)
+    estimated_notional = round(qty * entry_price, 2)
+
+    return jsonify({
+        "ok": True,
+        "service": "strategy_5",
+        "account_name": STRAT5_ACCOUNT_NAME,
+        "mode": STRAT5_MODE,
+        "simulation_only": SIMULATION_ONLY,
+        "alpaca_orders_enabled": PLACE_ALPACA_ORDERS,
+        "read_only_check": True,
+        "entry_price": round(entry_price, 4),
+        "max_position_dollars": STRAT5_MAX_POSITION_DOLLARS,
+        "calculated_qty": qty,
+        "estimated_notional": estimated_notional,
+        "starting_equity": STRAT5_STARTING_EQUITY,
+        "estimated_cash_after_entry": round(STRAT5_STARTING_EQUITY - estimated_notional, 2),
+        "one_open_trade": STRAT5_ONE_OPEN_TRADE,
+        "message": "Dry-run only. No trade created. No Alpaca order placed.",
+    }), 200
+# ===== COACH_T_STRAT5_SIZING_CHECK_END =====
+
 if MONITOR_ENABLED:
     start_monitor_loop()
 else:
