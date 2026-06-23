@@ -1326,6 +1326,124 @@ def strat5_sizing_check():
     }), 200
 # ===== COACH_T_STRAT5_SIZING_CHECK_END =====
 
+
+# ===== COACH_T_STRAT5_WEBHOOK_DRY_RUN_START =====
+@app.route("/webhook-dry-run", methods=["POST"])
+@app.route("/api/strat5/webhook-dry-run", methods=["POST"])
+def strat5_webhook_dry_run():
+    """
+    Dry-run Strategy 5 webhook validation.
+    This endpoint validates the same type of TradingView payload,
+    calculates $500 sizing, checks one-open-trade rules,
+    but does not create trades and does not place Alpaca orders.
+    """
+    payload = request.get_json(silent=True)
+
+    if not payload:
+        return jsonify({
+            "ok": False,
+            "dry_run": True,
+            "would_accept": False,
+            "blocked": True,
+            "reason": "Invalid or missing JSON.",
+        }), 400
+
+    incoming_secret = str(payload.get("secret", "")).strip()
+
+    if incoming_secret != WEBHOOK_SECRET:
+        return jsonify({
+            "ok": False,
+            "dry_run": True,
+            "would_accept": False,
+            "blocked": True,
+            "reason": "Invalid secret.",
+        }), 200
+
+    symbol = str(payload.get("symbol", "")).upper().strip()
+    side = str(payload.get("side", "buy")).lower().strip()
+    strategy = str(payload.get("strategy", STRATEGY_NAME)).strip()
+    model = str(payload.get("model", MODEL_NAME)).strip()
+
+    try:
+        price_float = float(payload.get("price"))
+    except Exception:
+        return jsonify({
+            "ok": False,
+            "dry_run": True,
+            "would_accept": False,
+            "blocked": True,
+            "reason": "Invalid price.",
+            "symbol": symbol,
+            "side": side,
+        }), 200
+
+    if not symbol:
+        return jsonify({
+            "ok": False,
+            "dry_run": True,
+            "would_accept": False,
+            "blocked": True,
+            "reason": "Missing symbol.",
+            "side": side,
+            "price": price_float,
+        }), 200
+
+    qty = calculate_strategy5_qty(price_float)
+
+    open_trades = get_open_strategy5_trades()
+    open_symbols = sorted([
+        str(t.get("symbol", "")).upper()
+        for t in open_trades
+        if t.get("symbol")
+    ])
+
+    same_symbol_open = symbol in open_symbols
+    one_open_block = STRAT5_ONE_OPEN_TRADE and len(open_trades) > 0
+
+    block_reasons = []
+
+    if side not in {"buy", "sell"}:
+        block_reasons.append(f"Unsupported side: {side}")
+
+    if qty <= 0 and side == "buy":
+        block_reasons.append("Invalid calculated quantity.")
+
+    if side == "buy" and same_symbol_open:
+        block_reasons.append("Duplicate open Strategy 5 trade for this symbol.")
+
+    if side == "buy" and one_open_block:
+        block_reasons.append("One-open-trade rule would block this entry.")
+
+    if side == "sell" and not same_symbol_open:
+        block_reasons.append("Sell/exit alert has no matching open trade.")
+
+    would_accept = len(block_reasons) == 0
+
+    return jsonify({
+        "ok": True,
+        "dry_run": True,
+        "would_accept": would_accept,
+        "blocked": not would_accept,
+        "reason": "PASS - webhook would be accepted." if would_accept else " | ".join(block_reasons),
+        "simulation_only": SIMULATION_ONLY,
+        "alpaca_orders_enabled": PLACE_ALPACA_ORDERS,
+        "account_name": STRAT5_ACCOUNT_NAME,
+        "mode": STRAT5_MODE,
+        "symbol": symbol,
+        "side": side,
+        "strategy": strategy,
+        "model": model,
+        "entry_price": round(price_float, 4),
+        "max_position_dollars": STRAT5_MAX_POSITION_DOLLARS,
+        "calculated_qty": qty,
+        "estimated_notional": round(qty * price_float, 2),
+        "one_open_trade": STRAT5_ONE_OPEN_TRADE,
+        "open_trade_count": len(open_trades),
+        "open_symbols": open_symbols,
+        "message": "Dry-run only. No trade created. No Alpaca order placed.",
+    }), 200
+# ===== COACH_T_STRAT5_WEBHOOK_DRY_RUN_END =====
+
 if MONITOR_ENABLED:
     start_monitor_loop()
 else:
