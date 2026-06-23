@@ -1030,6 +1030,158 @@ def webhook():
     })
 
 
+
+# ===== COACH_T_STRAT5_ALPACA_STATUS_START =====
+def strat5_env_bool(name, default="false"):
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def strat5_float(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def mask_secret(value):
+    value = str(value or "")
+    if len(value) <= 8:
+        return "loaded" if value else ""
+    return value[:4] + "..." + value[-4:]
+
+
+def alpaca_position_to_dict(position):
+    return {
+        "symbol": getattr(position, "symbol", None),
+        "side": getattr(position, "side", None),
+        "qty": strat5_float(getattr(position, "qty", 0)),
+        "avg_entry_price": strat5_float(getattr(position, "avg_entry_price", 0)),
+        "current_price": strat5_float(getattr(position, "current_price", 0)),
+        "market_value": strat5_float(getattr(position, "market_value", 0)),
+        "unrealized_pl": strat5_float(getattr(position, "unrealized_pl", 0)),
+        "unrealized_plpc": strat5_float(getattr(position, "unrealized_plpc", 0)),
+    }
+
+
+@app.route("/alpaca/status", methods=["GET"])
+@app.route("/api/strat5/alpaca-status", methods=["GET"])
+def strat5_alpaca_status():
+    """
+    Read-only Alpaca status check for Strategy 5 $500 paper account.
+    This endpoint does not place, cancel, or modify orders.
+    """
+    api_key = (
+        os.getenv("ALPACA_API_KEY")
+        or os.getenv("APCA_API_KEY_ID")
+        or ""
+    ).strip()
+
+    secret_key = (
+        os.getenv("ALPACA_SECRET_KEY")
+        or os.getenv("APCA_API_SECRET_KEY")
+        or ""
+    ).strip()
+
+    base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets").strip()
+    mode = os.getenv("STRAT5_MODE", "paper").strip().lower()
+    account_name = os.getenv("STRAT5_ACCOUNT_NAME", "Strat 5 - 500 Paper").strip()
+    starting_equity = strat5_float(os.getenv("STRAT5_STARTING_EQUITY", "500"), 500.0)
+    max_position_dollars = strat5_float(os.getenv("STRAT5_MAX_POSITION_DOLLARS", "500"), 500.0)
+    alpaca_orders_enabled = strat5_env_bool("STRAT5_ALPACA_ENABLED", "false")
+    one_open_trade = strat5_env_bool("STRAT5_ONE_OPEN_TRADE", "true")
+
+    paper = mode == "paper" or "paper" in base_url.lower()
+
+    base_response = {
+        "ok": False,
+        "service": "strategy_5",
+        "account_name": account_name,
+        "mode": mode,
+        "paper": paper,
+        "base_url": base_url,
+        "read_only_check": True,
+        "alpaca_orders_enabled": alpaca_orders_enabled,
+        "keys_loaded": bool(api_key and secret_key),
+        "api_key": mask_secret(api_key),
+        "starting_equity": starting_equity,
+        "max_position_dollars": max_position_dollars,
+        "one_open_trade": one_open_trade,
+        "connected": False,
+        "trading_blocked": True,
+        "trading_block_reason": "",
+        "positions": [],
+    }
+
+    if not api_key or not secret_key:
+        base_response["trading_block_reason"] = "Missing Alpaca API key or secret."
+        return jsonify(base_response), 200
+
+    try:
+        from alpaca.trading.client import TradingClient
+
+        client = TradingClient(
+            api_key=api_key,
+            secret_key=secret_key,
+            paper=paper,
+        )
+
+        account = client.get_account()
+        positions = client.get_all_positions()
+
+        equity = strat5_float(getattr(account, "equity", 0))
+        last_equity = strat5_float(getattr(account, "last_equity", 0))
+        cash = strat5_float(getattr(account, "cash", 0))
+        buying_power = strat5_float(getattr(account, "buying_power", 0))
+
+        account_blocked = bool(getattr(account, "account_blocked", False))
+        trading_blocked = bool(getattr(account, "trading_blocked", False))
+        transfers_blocked = bool(getattr(account, "transfers_blocked", False))
+
+        block_reasons = []
+        if not paper:
+            block_reasons.append("Not paper mode.")
+        if account_blocked:
+            block_reasons.append("Account blocked.")
+        if trading_blocked:
+            block_reasons.append("Trading blocked by Alpaca.")
+        if transfers_blocked:
+            block_reasons.append("Transfers blocked by Alpaca.")
+        if not alpaca_orders_enabled:
+            block_reasons.append("STRAT5_ALPACA_ENABLED=false; orders disabled.")
+
+        return jsonify({
+            **base_response,
+            "ok": True,
+            "connected": True,
+            "account_status": str(getattr(account, "status", "")),
+            "currency": str(getattr(account, "currency", "")),
+            "equity": equity,
+            "cash": cash,
+            "buying_power": buying_power,
+            "last_equity": last_equity,
+            "daily_pnl": round(equity - last_equity, 2) if last_equity else 0.0,
+            "paper_account_pnl_from_start": round(equity - starting_equity, 2),
+            "open_position_count": len(positions),
+            "positions": [alpaca_position_to_dict(p) for p in positions],
+            "account_blocked": account_blocked,
+            "trading_blocked": trading_blocked,
+            "transfers_blocked": transfers_blocked,
+            "trading_allowed_if_enabled": paper and not account_blocked and not trading_blocked,
+            "trading_block_reason": " | ".join(block_reasons) if block_reasons else "None",
+        }), 200
+
+    except Exception as exc:
+        return jsonify({
+            **base_response,
+            "ok": False,
+            "connected": False,
+            "trading_block_reason": f"Alpaca status check failed: {exc}",
+        }), 200
+# ===== COACH_T_STRAT5_ALPACA_STATUS_END =====
+
+
 if MONITOR_ENABLED:
     start_monitor_loop()
 else:
