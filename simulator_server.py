@@ -31,7 +31,9 @@ WEBHOOK_SECRET = (
 LOG_FILE = "strategy5_sim_log.csv"
 
 SIMULATION_ONLY = True
-PLACE_ALPACA_ORDERS = False
+PLACE_ALPACA_ORDERS = str(
+    os.getenv("STRAT5_ALPACA_ENABLED", "false")
+).strip().lower() in {"1", "true", "yes", "on"}
 
 STRATEGY_NAME = "strategy_5_orb_vwap"
 MODEL_NAME = "strategy5_tradingview_simulator"
@@ -564,6 +566,16 @@ def close_trade_in_postgres(trade, exit_price, status):
                 "timestamp_et": now_et_iso(),
                 "order_id": trade["order_id"],
             })
+
+        alpaca_exit_order = submit_strat5_alpaca_paper_order(
+            symbol=trade.get("symbol"),
+            side="sell",
+            qty=safe_float(trade.get("qty"), 0) or 0,
+            reason=f"Strategy 5 simulated exit: {status}",
+        )
+
+        if alpaca_exit_order.get("enabled"):
+            print(f"S5 ALPACA EXIT ORDER RESULT: {alpaca_exit_order}", flush=True)
 
         return True
 
@@ -1111,6 +1123,16 @@ def webhook():
 
     log_event(payload, "SIM_TRADE_CREATED", f"Simulated trade created for {symbol}")
 
+    alpaca_entry_order = submit_strat5_alpaca_paper_order(
+        symbol=symbol,
+        side="buy",
+        qty=trade.get("qty"),
+        reason="Strategy 5 simulated entry",
+    )
+
+    if alpaca_entry_order.get("enabled"):
+        print(f"S5 ALPACA ENTRY ORDER RESULT: {alpaca_entry_order}", flush=True)
+
     return jsonify({
         "ok": True,
         "simulation_only": True,
@@ -1121,6 +1143,7 @@ def webhook():
         "one_open_trade": STRAT5_ONE_OPEN_TRADE,
         "alpaca_orders_enabled": PLACE_ALPACA_ORDERS,
         "trade": trade,
+        "alpaca_entry_order": alpaca_entry_order,
         "postgres": {
             "ok": pg_ok,
             "message": pg_msg,
@@ -1280,6 +1303,113 @@ def strat5_alpaca_status():
 # ===== COACH_T_STRAT5_ALPACA_STATUS_END =====
 
 
+
+
+# ===== COACH_T_STRAT5_ALPACA_PAPER_ORDER_HELPER_START =====
+def submit_strat5_alpaca_paper_order(symbol, side, qty, reason=""):
+    """
+    Submit a Strategy 5 Alpaca PAPER market order only when STRAT5_ALPACA_ENABLED=true.
+    Default is disabled.
+    """
+    if not PLACE_ALPACA_ORDERS:
+        return {
+            "enabled": False,
+            "submitted": False,
+            "reason": "STRAT5_ALPACA_ENABLED=false; no Alpaca paper order placed.",
+        }
+
+    api_key = (os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID") or "").strip()
+    secret_key = (os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY") or "").strip()
+    base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets").strip()
+    mode = os.getenv("STRAT5_MODE", "paper").strip().lower()
+    paper = mode == "paper" or "paper" in base_url.lower()
+
+    if not paper:
+        return {
+            "enabled": True,
+            "submitted": False,
+            "error": "Blocked: Strategy 5 paper orders require paper mode.",
+            "base_url": base_url,
+            "mode": mode,
+        }
+
+    if not api_key or not secret_key:
+        return {
+            "enabled": True,
+            "submitted": False,
+            "error": "Missing Alpaca API key or secret.",
+        }
+
+    try:
+        qty = round(float(qty), 6)
+    except Exception:
+        qty = 0
+
+    if qty <= 0:
+        return {
+            "enabled": True,
+            "submitted": False,
+            "error": "Invalid order quantity.",
+            "symbol": str(symbol).upper().strip(),
+            "side": side,
+            "qty": qty,
+        }
+
+    side = str(side or "").lower().strip()
+    if side not in {"buy", "sell"}:
+        return {
+            "enabled": True,
+            "submitted": False,
+            "error": f"Unsupported side: {side}",
+            "symbol": str(symbol).upper().strip(),
+            "qty": qty,
+        }
+
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+
+        client = TradingClient(
+            api_key=api_key,
+            secret_key=secret_key,
+            paper=True,
+        )
+
+        order_request = MarketOrderRequest(
+            symbol=str(symbol).upper().strip(),
+            qty=qty,
+            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+
+        order = client.submit_order(order_request)
+
+        return {
+            "enabled": True,
+            "submitted": True,
+            "paper": True,
+            "symbol": str(symbol).upper().strip(),
+            "side": side,
+            "qty": qty,
+            "reason": reason,
+            "order_id": str(getattr(order, "id", "")),
+            "client_order_id": str(getattr(order, "client_order_id", "")),
+            "status": str(getattr(order, "status", "")),
+            "submitted_at": str(getattr(order, "submitted_at", "")),
+        }
+
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "submitted": False,
+            "error": str(exc),
+            "symbol": str(symbol).upper().strip(),
+            "side": side,
+            "qty": qty,
+            "reason": reason,
+        }
+# ===== COACH_T_STRAT5_ALPACA_PAPER_ORDER_HELPER_END =====
 
 # ===== COACH_T_STRAT5_SIZING_CHECK_START =====
 @app.route("/sizing-check", methods=["GET"])
